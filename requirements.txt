@@ -1,2 +1,17 @@
 streamlit
+pandas
 langchain-core
+langchain-text-splitters
+langchain-openai
+langchain-community
+faiss-cpu # 또는 GPU 사용 시 faiss-gpu
+# 파일 로더 관련 (Unstructured)
+unstructured # UnstructuredExcelLoader, UnstructuredWordDocumentLoader 용
+# 특정 파일 형식을 위한 추가 라이브러리 (unstructured가 자동으로 일부 설치하지만 명시)
+python-magic # TextLoader 등에서 파일 타입 감지에 필요할 수 있음 (주로 Linux/macOS)
+libmagic # python-magic의 윈도우 의존성 (Windows 사용자)
+# Excel 로딩을 위한 추가 라이브러리 (unstructured가 다양한 Excel 포맷 지원)
+openpyxl # .xlsx
+# CSV 로딩은 langchain_community.document_loaders.CSVLoader가 기본 라이브러리 사용
+# PDF 로딩 (PyPDFLoader)
+pypdf # PyPDFLoader가 사용하는 라이브러리
