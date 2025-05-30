@@ -27,37 +27,48 @@ DB_NAME = 'token_usage.sqlite'
 USD_TO_KRW_EXCHANGE_RATE = 1370.00 # 예시: 1 USD = 1370 KRW
 
 def init_db():
-    """데이터베이스와 테이블을 초기화합니다."""
+    """데이터베이스와 테이블을 초기화하고, 필요한 경우 스키마를 업데이트합니다."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
+
+    # 테이블 생성 (이미 존재하면 생성 안 함)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS usage_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            business_name TEXT, 
             model_name TEXT NOT NULL,
             prompt_tokens INTEGER,
             completion_tokens INTEGER,
             total_tokens INTEGER NOT NULL,
             cost_usd REAL,
             cost_krw REAL,
-            api_call_tag TEXT DEFAULT NULL -- API 호출을 식별할 수 있는 태그 (선택적)
+            api_call_tag TEXT DEFAULT NULL
         )
     ''')
+
+    # business_name 컬럼이 없는 경우 추가 (기존 DB 호환성)
+    cursor.execute("PRAGMA table_info(usage_logs)")
+    columns = [info[1] for info in cursor.fetchall()]
+    if 'business_name' not in columns:
+        try:
+            cursor.execute("ALTER TABLE usage_logs ADD COLUMN business_name TEXT")
+            print("INFO: 'business_name' column added to 'usage_logs' table.")
+        except sqlite3.OperationalError as e:
+            # 이미 컬럼이 추가되었거나 다른 문제 발생 시 (예: 동시성 문제)
+            print(f"WARNING: Could not add 'business_name' column, it might already exist or another issue occurred: {e}")
+    
     conn.commit()
     conn.close()
 
-def log_token_usage(model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd, api_call_tag=None):
+def log_token_usage(business_name, model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd, api_call_tag=None):
     """토큰 사용량 및 비용을 SQLite 데이터베이스에 기록합니다."""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
 
-    # get_openai_callback이 반환하는 prompt_tokens/completion_tokens가 -1일 수 있으므로 처리
     pt = prompt_tokens if prompt_tokens is not None and prompt_tokens >= 0 else None
     ct = completion_tokens if completion_tokens is not None and completion_tokens >= 0 else None
-    
-    # total_tokens는 항상 유효한 값으로 가정 (get_openai_callback 특성상)
     tt = total_tokens if total_tokens is not None else 0
-
 
     cost_krw = None
     if cost_usd is not None:
@@ -66,17 +77,13 @@ def log_token_usage(model_name, prompt_tokens, completion_tokens, total_tokens, 
 
     try:
         cursor.execute('''
-            INSERT INTO usage_logs (model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd, cost_krw, api_call_tag)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (model_name, pt, ct, tt, cost_usd, cost_krw, api_call_tag))
+            INSERT INTO usage_logs (business_name, model_name, prompt_tokens, completion_tokens, total_tokens, cost_usd, cost_krw, api_call_tag)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (business_name, model_name, pt, ct, tt, cost_usd, cost_krw, api_call_tag))
         conn.commit()
-        # 간단한 로깅 확인 (Streamlit 앱 UI에 직접 표시하기보다는 콘솔이나 파일 로그가 적합할 수 있음)
-        # print(f"Logged to DB: {api_call_tag}, Model: {model_name}, Tokens: {tt}, Cost KRW: {cost_krw}")
+        # print(f"Logged to DB: Business: {business_name}, Tag: {api_call_tag}, Model: {model_name}, Tokens: {tt}, Cost KRW: {cost_krw}")
     except sqlite3.Error as e:
-        # Streamlit 앱에서는 사용자에게 오류를 알리는 것이 좋을 수 있습니다.
-        # 다만, 로깅 실패가 앱의 주 기능을 방해해서는 안 됩니다.
-        print(f"SQLite 로깅 오류: {e}") # 콘솔에 오류 출력
-        # st.sidebar.error(f"로깅 실패: {e}") # 필요시 UI에 표시
+        print(f"SQLite 로깅 오류: {e}") 
     finally:
         conn.close()
 
@@ -112,8 +119,6 @@ def get_llm(_api_key):
     if not _api_key:
         return None
     try:
-        # 사용될 모델명을 여기서 명시적으로 정의합니다.
-        # 이 모델명은 로깅 시 사용됩니다.
         return ChatOpenAI(model="gpt-4o", temperature=0, openai_api_key=_api_key)
     except Exception as e:
         st.error(f"LLM 로딩 실패 (get_llm): {e}")
@@ -386,20 +391,21 @@ else:
 
 st.markdown("---")
 
-selected_business_name = st.selectbox(
+selected_business_name_from_selectbox = st.selectbox( # 변수명 변경으로 명확화
     "검토 기준이 될 사업을 선택하세요:",
     options=list(GUIDELINE_FILES.keys()),
     key="business_selection_selectbox",
     index=list(GUIDELINE_FILES.keys()).index(st.session_state.get("selected_business_name_stored", DEFAULT_BUSINESS_NAME))
 )
 
-if selected_business_name:
-    st.session_state.selected_business_name_stored = selected_business_name
-    st.session_state.current_guideline_path = GUIDELINE_FILES[selected_business_name]
-    st.session_state.current_guideline_name = selected_business_name
+if selected_business_name_from_selectbox: # 변경된 변수명 사용
+    st.session_state.selected_business_name_stored = selected_business_name_from_selectbox
+    # current_guideline_name이 실제 사용되는 사업명 (로깅에 이 값을 사용)
+    st.session_state.current_guideline_name = selected_business_name_from_selectbox 
+    st.session_state.current_guideline_path = GUIDELINE_FILES[selected_business_name_from_selectbox]
 else: 
     st.session_state.current_guideline_path = None
-    st.session_state.current_guideline_name = None
+    st.session_state.current_guideline_name = None # 사업명이 선택되지 않은 경우 None으로 설정
     st.warning("사업을 선택해주세요.")
     st.stop()
 
@@ -408,14 +414,14 @@ if st.session_state.current_guideline_path and st.session_state.current_guidelin
     guideline_vector_store = get_cached_guideline_vector_store(
         embeddings_model_global, 
         st.session_state.current_guideline_path, 
-        st.session_state.current_guideline_name
+        st.session_state.current_guideline_name # 사업명 전달
     )
 
     if guideline_vector_store:
         active_guideline_rag_chain = get_rag_chain_for_guideline(
             guideline_vector_store, 
             llm_global, 
-            st.session_state.current_guideline_name
+            st.session_state.current_guideline_name # 사업명 전달
         )
         if active_guideline_rag_chain:
             st.success(f"'{st.session_state.current_guideline_name}' 지침 기반 RAG 체인 준비 완료.")
@@ -449,7 +455,7 @@ if "last_review_config_key_processed" not in st.session_state:
 if "auto_review_output" not in st.session_state:
     st.session_state.auto_review_output = None
 
-if uploaded_file_for_review is not None and active_guideline_rag_chain:
+if uploaded_file_for_review is not None and active_guideline_rag_chain and st.session_state.current_guideline_name: # 사업명 확인 추가
     if st.session_state.last_review_config_key_processed != current_review_config_key:
         st.session_state.auto_review_output = None 
         st.session_state.last_review_config_key_processed = current_review_config_key
@@ -463,32 +469,12 @@ if uploaded_file_for_review is not None and active_guideline_rag_chain:
             
             if uploaded_docs_content_list:
                 content_to_review = ""
-                # 전체 문서 내용을 합치거나, 주요 부분만 선택하는 로직 (현재는 처음 2개 문서의 앞부분 1000자)
-                # 매우 큰 파일의 경우 전체를 넣으면 토큰 제한 및 비용 문제가 발생할 수 있습니다.
-                # 이 부분은 서비스 정책에 맞게 조절 필요
-                doc_contents_for_input = "\n\n".join([doc.page_content for doc in uploaded_docs_content_list])
-                # 실제 LLM에 전달할 내용 (예시: 앞부분만 사용하거나 요약본 사용)
-                # 여기서는 원본 프롬프트 의도대로 일부 내용만 표시
-                for doc_idx, doc in enumerate(uploaded_docs_content_list[:2]): # 최대 2개 문서 일부 표시
+                for doc_idx, doc in enumerate(uploaded_docs_content_list[:2]): 
                     content_to_review += f"[문서 {doc_idx+1} 시작]\n"
-                    content_to_review += str(doc.page_content)[:1000] + "\n" # 문서당 1000자
+                    content_to_review += str(doc.page_content)[:1000] + "\n" 
                     content_to_review += f"[문서 {doc_idx+1} 끝]\n...\n"
                 
-                # 실제 RAG 체인에 전달할 input은 전체 문서 내용으로 구성된 doc_contents_for_input 또는 그 일부/요약본이 될 수 있습니다.
-                # 현재 프롬프트는 '문서의 일부 내용'이라고 가정하고 있으므로, content_to_review를 사용할 수 있으나,
-                # 효과적인 검토를 위해서는 더 많은 내용을 전달하거나, 사용자가 주요 부분을 지정하게 하는 것이 좋습니다.
-                # 여기서는 auto_review_question에 사용되는 content_to_review가 LLM 입력으로 간주됩니다.
-                # 이 content_to_review가 너무 길면 토큰 문제를 야기할 수 있습니다.
-                # 효과적인 자동 검토를 위해 전달하는 내용을 신중히 결정해야 합니다.
-                # 예시에서는 content_to_review를 사용하되, 이것이 LLM의 컨텍스트 한계를 넘지 않도록 주의해야 합니다.
-                # 아래의 auto_review_question은 프롬프트에 삽입되는 내용이므로, 실제로는 이 내용이 LLM에 전달됩니다.
-                
-                if content_to_review.strip(): # 표시용 content
-                    # LLM에 실제 전달할 검토 대상 텍스트. content_to_review는 일부만 표시한 것이므로,
-                    # 실제 검토는 더 많은 내용을 포함해야 할 수 있음. 여기서는 프롬프트에 맞춰 일부만 전달하는 형태로 유지.
-                    # 만약 전체 문서를 검토시키려면, full_content_for_llm = "\n\n".join([d.page_content for d in uploaded_docs_content_list]) 와 같이 구성하고
-                    # auto_review_question 내의 {content_to_review.strip()} 부분을 {full_content_for_llm} 등으로 변경해야 합니다.
-                    # (토큰 수 관리 주의)
+                if content_to_review.strip(): 
                     auto_review_question = f"다음은 기업이 제출한 문서의 일부 내용입니다. 이 내용이 '{st.session_state.current_guideline_name}' 지침에 부합하는지, 특별히 주의해야 할 점이나 확인이 필요한 사항이 있는지 검토해주세요:\n\n---\n{content_to_review.strip()}\n---"
                     
                     with st.spinner("자동 검토 의견 생성 중..."):
@@ -500,8 +486,8 @@ if uploaded_file_for_review is not None and active_guideline_rag_chain:
                                 prompt_tokens = cb.prompt_tokens
                                 completion_tokens = cb.completion_tokens
                                 
-                                # DB 로깅
                                 log_token_usage(
+                                    business_name=st.session_state.current_guideline_name, # 사업명 전달
                                     model_name=llm_global.model_name,
                                     prompt_tokens=prompt_tokens,
                                     completion_tokens=completion_tokens,
@@ -548,13 +534,17 @@ elif uploaded_file_for_review is None:
     st.info("자동 검토를 위해 기업 문서를 업로드해주세요.")
 elif not active_guideline_rag_chain:
     st.warning("자동 검토를 위한 지침 RAG 체인이 준비되지 않았습니다. API키와 사업 선택을 확인해주세요.")
+elif not st.session_state.current_guideline_name: # 사업명이 선택되지 않은 경우
+    st.warning("자동 검토를 실행하기 전에 먼저 사업을 선택해주세요.")
+
 
 st.markdown("---")
 st.subheader("2. 업로드된 문서에 대해 직접 질의응답")
 st.caption("위 '자동 검토' 섹션에서 사용된 동일한 업로드 파일을 대상으로 직접 질문하고 답변을 받을 수 있습니다.")
 
 uploaded_doc_qa_chain = None
-if uploaded_file_for_review is not None: 
+# 사업명이 선택되었고, 파일이 업로드 되었을 때만 이 섹션 활성화
+if uploaded_file_for_review is not None and st.session_state.current_guideline_name: 
     current_uploaded_file_key_for_qa_tuple = (
         uploaded_file_for_review.name,
         uploaded_file_for_review.size,
@@ -565,7 +555,7 @@ if uploaded_file_for_review is not None:
     chain_session_key = f"uploaded_chain_{current_uploaded_file_key_for_qa_tuple}_{OPENAI_API_KEY_INPUT}"
 
     if chain_session_key not in st.session_state: 
-        st.info(f"'{uploaded_file_for_review.name}' 문서 기반 질의응답 준비 중...")
+        st.info(f"'{uploaded_file_for_review.name}' 문서 기반 질의응답 준비 중 ({st.session_state.current_guideline_name} 사업 컨텍스트)...")
         temp_file_path_for_qa = save_uploaded_file_to_temp(uploaded_file_for_review) 
         
         if temp_file_path_for_qa:
@@ -612,8 +602,8 @@ if uploaded_file_for_review is not None:
 
     if uploaded_doc_qa_chain:
         user_question_for_uploaded_doc = st.text_input(
-            f"'{uploaded_file_for_review.name}' 내용에 대해 질문하세요:",
-            key=f"user_question_direct_uploaded_{uploaded_file_for_review.name}_{st.session_state.get('current_guideline_name', 'no_guideline')}" 
+            f"'{uploaded_file_for_review.name}' 내용에 대해 질문하세요 ({st.session_state.current_guideline_name} 사업 관련):",
+            key=f"user_question_direct_uploaded_{uploaded_file_for_review.name}_{st.session_state.current_guideline_name}" 
         )
         if user_question_for_uploaded_doc:
             with st.spinner("답변 생성 중..."):
@@ -625,8 +615,8 @@ if uploaded_file_for_review is not None:
                         prompt_tokens = cb.prompt_tokens
                         completion_tokens = cb.completion_tokens
 
-                        # DB 로깅
                         log_token_usage(
+                            business_name=st.session_state.current_guideline_name, # 사업명 전달
                             model_name=llm_global.model_name,
                             prompt_tokens=prompt_tokens,
                             completion_tokens=completion_tokens,
@@ -650,8 +640,11 @@ if uploaded_file_for_review is not None:
     elif uploaded_file_for_review is not None : 
         st.warning("업로드된 문서에 대한 질의응답 기능이 아직 준비되지 않았거나 초기화 중입니다. 잠시 후 다시 시도해주세요.")
 
-else:
+elif not st.session_state.current_guideline_name:
+     st.info("문서 질의응답을 위해 먼저 사업을 선택해주세요.")
+else: # uploaded_file_for_review is None but business_name is selected
     st.info("문서를 업로드하면 해당 문서에 대한 자동 검토 및 직접 질의응답 기능을 사용할 수 있습니다.")
+
 
 st.markdown("---")
 st.subheader("3. 지침 문서 직접 질의응답")
@@ -675,8 +668,8 @@ if active_guideline_rag_chain and st.session_state.current_guideline_name:
                     prompt_tokens = cb.prompt_tokens
                     completion_tokens = cb.completion_tokens
 
-                    # DB 로깅
                     log_token_usage(
+                        business_name=st.session_state.current_guideline_name, # 사업명 전달
                         model_name=llm_global.model_name,
                         prompt_tokens=prompt_tokens,
                         completion_tokens=completion_tokens,
@@ -702,7 +695,7 @@ if active_guideline_rag_chain and st.session_state.current_guideline_name:
                 st.error(f"'{st.session_state.current_guideline_name}' 지침 직접 질의응답 중 오류 발생: {e}")
 elif not st.session_state.current_guideline_name:
      st.info("먼저 검토 기준이 될 사업을 선택해주세요.")
-else:
+else: # active_guideline_rag_chain is None (and business_name might be selected)
     st.warning(f"'{st.session_state.current_guideline_name}' 지침에 대한 RAG 체인이 준비되지 않았습니다. API키와 사업 선택을 확인해주세요.")
 
 # --- (선택적) 로깅된 데이터 확인 UI ---
@@ -713,22 +706,25 @@ show_logs_button = st.sidebar.button("사용량 로그 보기")
 if show_logs_button:
     try:
         conn = sqlite3.connect(DB_NAME)
-        # pandas가 있다면 df = pd.read_sql_query("SELECT * FROM usage_logs ORDER BY timestamp DESC LIMIT 10", conn)
-        # st.sidebar.dataframe(df)
-        # pandas가 없다면 간단히 텍스트로 표시:
         cursor = conn.cursor()
-        cursor.execute("SELECT timestamp, api_call_tag, model_name, total_tokens, cost_usd, cost_krw FROM usage_logs ORDER BY timestamp DESC LIMIT 10")
+        # business_name 컬럼을 포함하여 조회
+        cursor.execute("SELECT timestamp, business_name, api_call_tag, model_name, total_tokens, cost_usd, cost_krw FROM usage_logs ORDER BY timestamp DESC LIMIT 10")
         logs = cursor.fetchall()
         conn.close()
         
         if logs:
+            st.sidebar.markdown("`시간 | 사업명 | 호출태그 | 모델 | 토큰 | USD | KRW`")
             for log_entry in logs:
-                ts, tag, model, tokens, usd, krw = log_entry
-                st.sidebar.text(f"{ts[:19]} | {tag if tag else 'N/A'} | {model} | T: {tokens} | ${usd:.4f} | ₩{krw:,.0f if krw else 0}")
+                ts, biz_name, tag, model, tokens, usd, krw = log_entry
+                # 소수점 및 None 값 처리 개선
+                usd_display = f"${usd:.4f}" if usd is not None else "N/A"
+                krw_display = f"₩{krw:,.0f}" if krw is not None else "N/A"
+                tag_display = tag if tag else "N/A"
+                biz_name_display = biz_name if biz_name else "N/A"
+
+                st.sidebar.text(f"{ts[:19]} | {biz_name_display} | {tag_display} | {model} | T:{tokens} | {usd_display} | {krw_display}")
         else:
             st.sidebar.info("기록된 사용 내역이 없습니다.")
             
     except Exception as e:
         st.sidebar.error(f"로그 조회 중 오류: {e}")
-
-        
